@@ -2,15 +2,19 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "module description"
+      "value": "X-Ray YOLOv5s Detection Module"
     },
     {
       "name": "EntryAbility_desc",
-      "value": "description"
+      "value": "X-Ray chest image detection using YOLOv5s on Ascend 310B"
     },
     {
       "name": "EntryAbility_label",
-      "value": "label"
+      "value": "X-Ray YOLOv5s"
+    },
+    {
+      "name": "read_media_reason",
+      "value": "Need to read X-ray images from gallery for disease detection"
     }
   ]
 }

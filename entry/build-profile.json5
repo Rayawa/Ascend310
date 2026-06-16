@@ -5,6 +5,18 @@
       "copyCodeResource": {
         "enable": false
       }
+    },
+    "externalNativeOptions": {
+      "path": "./src/main/cpp/CMakeLists.txt",
+      "arguments": "",
+      "cppFlags": ""
+    },
+    "arkOptions": {
+      "runtimeOnly": {
+        "packages": [
+          "libentry.so"
+        ]
+      }
     }
   },
   "buildOptionSet": [

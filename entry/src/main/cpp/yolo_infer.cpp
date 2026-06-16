@@ -1,98 +1,372 @@
 #include "yolo_infer.h"
+#include <cstring>
+#include <algorithm>
+#include <numeric>
 
-YoloInference::YoloInference() : deviceId_(0), modelId_(0), isLoad_(false), modelDesc_(nullptr) {}
+YoloInference::YoloInference()
+    : deviceId_(0), context_(nullptr), stream_(nullptr),
+      modelId_(0), modelMemSize_(0), modelWorkSize_(0),
+      modelMemPtr_(nullptr), modelWorkPtr_(nullptr),
+      isLoad_(false), deviceInited_(false),
+      modelDesc_(nullptr),
+      inputSize_(0), inputDeviceBuffer_(nullptr),
+      outputSize_(0), outputDeviceBuffer_(nullptr),
+      outputHostBuffer_(nullptr) {}
+
 YoloInference::~YoloInference() { Unload(); }
 
-// ===== 步骤 1：初始化 NPU =====
 bool YoloInference::InitDevice(int32_t deviceId) {
+    auto& acl = AclDl::Instance();
+    if (!acl.Load()) {
+        std::cout << "[YOLO] Failed to load ACL runtime library" << std::endl;
+        return false;
+    }
+
     deviceId_ = deviceId;
-    // 初始化 CANN 资源
-    aclError ret = aclInit(nullptr);
-    // 指定使用具体的 310B 芯片设备 (通常单板上填 0)
-    ret = aclrtSetDevice(deviceId_);
-    // 创建 Context 和 Stream 任务流
-    ret = aclrtCreateContext(&context_, deviceId_);
-    ret = aclrtCreateStream(&stream_);
-    return true;
-}
 
-// ===== 步骤 2：加载 .om 模型 =====
-bool YoloInference::LoadModel(const std::string& modelPath) {
-    // 从板端磁盘读取 .om 文件并加载到 NPU 内存中
-    aclError ret = aclmdlLoadFromFileWithMem(modelPath.c_str(), &modelId_, 
-                                             modelMemPtr_, modelMemSize_, 
-                                             modelWorkPtr_, modelWorkSize_);
-    // 获取模型输入输出的结构描述（比如知道模型需要多大分辨率、输出几个 Tensor）
-    modelDesc_ = aclmdlCreateDesc();
-    ret = aclmdlGetDesc(modelDesc_, modelId_);
-    isLoad_ = true;
-    return true;
-}
+    int ret = acl.aclInit(nullptr);
+    if (ret != ACL_SUCCESS && ret != ACL_ERROR_REPEAT_INITIALIZE) {
+        std::cout << "[YOLO] aclInit failed, ret=" << ret << std::endl;
+        return false;
+    }
 
-// ===== 步骤 3：核心推理业务 =====
-std::vector<DetectionResult> YoloInference::DoInference(const void* imageBuffer, size_t bufferSize) {
-    std::vector<DetectionResult> results;
-    
-    // 3.1 申请 NPU 上的输入/输出专用内存（Device 侧内存）
-    void* inputDeviceBuffer = nullptr;
-    aclrtMalloc(&inputDeviceBuffer, bufferSize, ACL_MEM_MALLOC_HUGE_FIRST);
-    
-    // 3.2 将前端传进来的内存数据拷贝到 NPU 内存中
-    aclrtMemcpy(inputDeviceBuffer, bufferSize, imageBuffer, bufferSize, ACL_RT_MEMCPY_HOST_TO_DEVICE);
-
-    // 3.3 创建 CANN 推理专用的 Dataset 数据包
-    inputDataset_ = aclmdlCreateDataset();
-    aclDataBuffer* inputData = aclCreateDataBuffer(inputDeviceBuffer, bufferSize);
-    aclmdlAddDatasetBuffer(inputDataset_, inputData);
-
-    // (此处省略创建 outputDataset_ 的相似代码，用来接收模型的输出)
-
-    // 3.4 🌟 触发昇腾 310B 硬件推理（阻塞/异步执行）
-    aclError ret = aclmdlExecute(modelId_, inputDataset_, outputDataset_);
+    ret = acl.aclrtSetDevice(deviceId_);
     if (ret != ACL_SUCCESS) {
-        std::cout << "CANN 推理失败!" << std::endl;
+        std::cout << "[YOLO] aclrtSetDevice failed, ret=" << ret << std::endl;
+        return false;
+    }
+
+    ret = acl.aclrtCreateContext(&context_, deviceId_);
+    if (ret != ACL_SUCCESS) {
+        std::cout << "[YOLO] aclrtCreateContext failed, ret=" << ret << std::endl;
+        return false;
+    }
+
+    ret = acl.aclrtCreateStream(&stream_);
+    if (ret != ACL_SUCCESS) {
+        std::cout << "[YOLO] aclrtCreateStream failed, ret=" << ret << std::endl;
+        return false;
+    }
+
+    deviceInited_ = true;
+    std::cout << "[YOLO] Device init success, deviceId=" << deviceId_ << std::endl;
+    return true;
+}
+
+bool YoloInference::LoadModel(const std::string& modelPath) {
+    auto& acl = AclDl::Instance();
+    if (!deviceInited_) {
+        std::cout << "[YOLO] Device not initialized!" << std::endl;
+        return false;
+    }
+
+    modelDesc_ = acl.aclmdlCreateDesc();
+    if (modelDesc_ == nullptr) {
+        std::cout << "[YOLO] aclmdlCreateDesc failed" << std::endl;
+        return false;
+    }
+
+    int ret = acl.aclmdlLoadFromFile(modelPath.c_str(), &modelId_);
+    if (ret != ACL_SUCCESS) {
+        std::cout << "[YOLO] aclmdlLoadFromFile failed, ret=" << ret
+                  << " path=" << modelPath << std::endl;
+        acl.aclmdlDestroyDesc(modelDesc_);
+        modelDesc_ = nullptr;
+        return false;
+    }
+
+    ret = acl.aclmdlGetDesc(modelDesc_, modelId_);
+    if (ret != ACL_SUCCESS) {
+        std::cout << "[YOLO] aclmdlGetDesc failed, ret=" << ret << std::endl;
+        acl.aclmdlUnload(modelId_);
+        acl.aclmdlDestroyDesc(modelDesc_);
+        modelDesc_ = nullptr;
+        return false;
+    }
+
+    size_t inputCount = acl.aclmdlGetNumInputs(modelDesc_);
+    size_t outputCount = acl.aclmdlGetNumOutputs(modelDesc_);
+    std::cout << "[YOLO] Model loaded: inputs=" << inputCount
+              << " outputs=" << outputCount << std::endl;
+
+    if (inputCount > 0) {
+        inputSize_ = acl.aclmdlGetInputSizeByIndex(modelDesc_, 0);
+        std::cout << "[YOLO] Input[0] size=" << inputSize_ << " bytes" << std::endl;
+    }
+
+    if (outputCount > 0) {
+        outputSize_ = acl.aclmdlGetOutputSizeByIndex(modelDesc_, 0);
+        std::cout << "[YOLO] Output[0] size=" << outputSize_ << " bytes" << std::endl;
+    }
+
+    acl.aclrtMalloc(&inputDeviceBuffer_, inputSize_, ACL_MEM_MALLOC_HUGE_FIRST);
+    acl.aclrtMalloc(&outputDeviceBuffer_, outputSize_, ACL_MEM_MALLOC_HUGE_FIRST);
+    outputHostBuffer_ = new float[outputSize_ / sizeof(float)];
+
+    isLoad_ = true;
+    std::cout << "[YOLO] Model load success" << std::endl;
+    return true;
+}
+
+std::vector<DetectionResult> YoloInference::DoInference(
+    const void* imageData, size_t imageSize,
+    int origWidth, int origHeight) {
+    std::vector<DetectionResult> results;
+    auto& acl = AclDl::Instance();
+
+    if (!isLoad_) {
+        std::cout << "[YOLO] Model not loaded!" << std::endl;
         return results;
     }
 
-    // 3.5 调用后处理：提取输出的 Float 数组进行 Yolo 的解码与 NMS
-    results = PostProcess();
+    acl.aclrtSetCurrentContext(context_);
 
-    // 3.6 记得及时释放本次推理申请的临时 Device 内存
-    aclrtFree(inputDeviceBuffer);
-    // 销毁 dataset 结构...
-    
-    return results; // 返回干净的坐标框丢给 NAPI
+    size_t requiredInputSize = INPUT_H * INPUT_W * 3 * sizeof(float);
+    if (inputSize_ == 0) {
+        inputSize_ = requiredInputSize;
+    }
+
+    std::vector<float> inputFloat(INPUT_H * INPUT_W * 3, 0.0f);
+
+    const uint8_t* rgbaData = static_cast<const uint8_t*>(imageData);
+    size_t pixelCount = imageSize / 4;
+    if (pixelCount > static_cast<size_t>(INPUT_H * INPUT_W)) {
+        pixelCount = INPUT_H * INPUT_W;
+    }
+
+    for (size_t i = 0; i < pixelCount; i++) {
+        inputFloat[i] = rgbaData[i * 4 + 0] / 255.0f;
+        inputFloat[INPUT_H * INPUT_W + i] = rgbaData[i * 4 + 1] / 255.0f;
+        inputFloat[2 * INPUT_H * INPUT_W + i] = rgbaData[i * 4 + 2] / 255.0f;
+    }
+
+    acl.aclrtMemcpy(inputDeviceBuffer_, inputSize_,
+                inputFloat.data(), requiredInputSize,
+                ACL_RT_MEMCPY_HOST_TO_DEVICE);
+
+    void* inputDataBuf = acl.aclCreateDataBuffer(inputDeviceBuffer_, inputSize_);
+    void* inputDataset = acl.aclmdlCreateDataset();
+    acl.aclmdlAddDatasetBuffer(inputDataset, inputDataBuf);
+
+    void* outputDataBuf = acl.aclCreateDataBuffer(outputDeviceBuffer_, outputSize_);
+    void* outputDataset = acl.aclmdlCreateDataset();
+    acl.aclmdlAddDatasetBuffer(outputDataset, outputDataBuf);
+
+    int ret = acl.aclmdlExecute(modelId_, inputDataset, outputDataset);
+    if (ret != ACL_SUCCESS) {
+        std::cout << "[YOLO] aclmdlExecute failed, ret=" << ret << std::endl;
+        acl.aclDestroyDataBuffer(inputDataBuf);
+        acl.aclDestroyDataBuffer(outputDataBuf);
+        acl.aclmdlDestroyDataset(inputDataset);
+        acl.aclmdlDestroyDataset(outputDataset);
+        return results;
+    }
+
+    ret = acl.aclrtMemcpy(outputHostBuffer_, outputSize_,
+                      outputDeviceBuffer_, outputSize_,
+                      ACL_RT_MEMCPY_DEVICE_TO_HOST);
+    if (ret != ACL_SUCCESS) {
+        std::cout << "[YOLO] aclrtMemcpy output failed, ret=" << ret << std::endl;
+    }
+
+    int outputFloatCount = static_cast<int>(outputSize_ / sizeof(float));
+    results = PostProcess(outputHostBuffer_, outputFloatCount, origWidth, origHeight);
+
+    acl.aclDestroyDataBuffer(inputDataBuf);
+    acl.aclDestroyDataBuffer(outputDataBuf);
+    acl.aclmdlDestroyDataset(inputDataset);
+    acl.aclmdlDestroyDataset(outputDataset);
+
+    return results;
 }
 
-// ===== 步骤 4：YOLO 专属后处理 =====
-std::vector<DetectionResult> YoloInference::PostProcess() {
-    std::vector<DetectionResult> finalBoxes;
-    
-    // 从 outputDataset_ 中拿到推理出来的裸数据指针 (Raw Pointer)
-    aclDataBuffer* dataBuffer = aclmdlGetDatasetBuffer(outputDataset_, 0);
-    void* outData = aclGetDataBufferAddr(dataBuffer);
-    float* outFloats = reinterpret_cast<float*>(outData);
+std::vector<DetectionResult> YoloInference::PostProcess(
+    const float* outputData, int outputCount,
+    int origWidth, int origHeight) {
+    std::vector<DetectionResult> finalResults;
 
-    // 📢 算法同学的主场：
-    // YOLO 模型输出一般是 [1, 84, 8400] 这样的矩阵
-    // 算法同学需要在这里写循环：
-    // 1. 遍历这 8400 个候选框
-    // 2. 过滤掉置信度低于阈值（如 0.4）的框
-    // 3. 运行 NMS（非极大值抑制）算法消灭重复的重叠框
-    // 4. 将留下来的有效框坐标【归一化】成 0~1 的比例，压进 finalBoxes
-    
-    return finalBoxes;
+    int totalElements = OUTPUT_BOX_NUM * OUTPUT_ELEM_PER_ROW;
+
+    std::vector<std::vector<BBoxInternal>> classBoxes(CLASS_NUM);
+
+    for (int i = 0; i < OUTPUT_BOX_NUM; i++) {
+        int rowOffset = i * OUTPUT_ELEM_PER_ROW;
+
+        if (rowOffset + OUTPUT_ELEM_PER_ROW > outputCount) {
+            break;
+        }
+
+        float objConf = outputData[rowOffset + 4];
+        if (objConf < CONF_THRESHOLD) {
+            continue;
+        }
+
+        int bestClassId = 0;
+        float bestClassScore = outputData[rowOffset + 5];
+        for (int c = 1; c < CLASS_NUM; c++) {
+            float score = outputData[rowOffset + 5 + c];
+            if (score > bestClassScore) {
+                bestClassScore = score;
+                bestClassId = c;
+            }
+        }
+
+        float finalScore = objConf * bestClassScore;
+        if (finalScore < CONF_THRESHOLD) {
+            continue;
+        }
+
+        float cx = outputData[rowOffset + 0];
+        float cy = outputData[rowOffset + 1];
+        float w = outputData[rowOffset + 2];
+        float h = outputData[rowOffset + 3];
+
+        float x1 = (cx - w / 2.0f) / INPUT_W;
+        float y1 = (cy - h / 2.0f) / INPUT_H;
+        float x2 = (cx + w / 2.0f) / INPUT_W;
+        float y2 = (cy + h / 2.0f) / INPUT_H;
+
+        x1 = std::max(0.0f, std::min(1.0f, x1));
+        y1 = std::max(0.0f, std::min(1.0f, y1));
+        x2 = std::max(0.0f, std::min(1.0f, x2));
+        y2 = std::max(0.0f, std::min(1.0f, y2));
+
+        BBoxInternal bbox;
+        bbox.x1 = x1;
+        bbox.y1 = y1;
+        bbox.x2 = x2;
+        bbox.y2 = y2;
+        bbox.score = finalScore;
+        bbox.classId = bestClassId;
+
+        classBoxes[bestClassId].push_back(bbox);
+    }
+
+    for (int c = 0; c < CLASS_NUM; c++) {
+        std::vector<BBoxInternal> nmsResult = NMS(classBoxes[c], NMS_THRESHOLD);
+
+        for (const auto& box : nmsResult) {
+            DetectionResult det;
+            det.x = box.x1;
+            det.y = box.y1;
+            det.width = box.x2 - box.x1;
+            det.height = box.y2 - box.y1;
+            det.confidence = box.score;
+            det.classId = box.classId;
+            det.label = CLASS_NAMES[box.classId];
+            finalResults.push_back(det);
+        }
+    }
+
+    std::sort(finalResults.begin(), finalResults.end(),
+              [](const DetectionResult& a, const DetectionResult& b) {
+                  return a.confidence > b.confidence;
+              });
+
+    std::cout << "[YOLO] PostProcess: " << finalResults.size()
+              << " detections from " << OUTPUT_BOX_NUM << " candidates" << std::endl;
+
+    return finalResults;
 }
 
-// ===== 步骤 5：优雅释放 =====
+std::vector<BBoxInternal> YoloInference::NMS(
+    std::vector<BBoxInternal>& boxes, float iouThreshold) {
+    std::vector<BBoxInternal> result;
+    if (boxes.empty()) {
+        return result;
+    }
+
+    std::sort(boxes.begin(), boxes.end(),
+              [](const BBoxInternal& a, const BBoxInternal& b) {
+                  return a.score > b.score;
+              });
+
+    std::vector<bool> suppressed(boxes.size(), false);
+
+    for (size_t i = 0; i < boxes.size(); i++) {
+        if (suppressed[i]) {
+            continue;
+        }
+        result.push_back(boxes[i]);
+
+        for (size_t j = i + 1; j < boxes.size(); j++) {
+            if (suppressed[j]) {
+                continue;
+            }
+            float iou = ComputeIoU(boxes[i], boxes[j]);
+            if (iou > iouThreshold) {
+                suppressed[j] = true;
+            }
+        }
+    }
+
+    return result;
+}
+
+float YoloInference::ComputeIoU(const BBoxInternal& a, const BBoxInternal& b) {
+    float interX1 = std::max(a.x1, b.x1);
+    float interY1 = std::max(a.y1, b.y1);
+    float interX2 = std::min(a.x2, b.x2);
+    float interY2 = std::min(a.y2, b.y2);
+
+    float interW = std::max(0.0f, interX2 - interX1);
+    float interH = std::max(0.0f, interY2 - interY1);
+    float interArea = interW * interH;
+
+    float areaA = (a.x2 - a.x1) * (a.y2 - a.y1);
+    float areaB = (b.x2 - b.x1) * (b.y2 - b.y1);
+    float unionArea = areaA + areaB - interArea;
+
+    if (unionArea <= 0.0f) {
+        return 0.0f;
+    }
+    return interArea / unionArea;
+}
+
 void YoloInference::Unload() {
+    auto& acl = AclDl::Instance();
+
+    if (inputDeviceBuffer_ != nullptr && acl.aclrtFree) {
+        acl.aclrtFree(inputDeviceBuffer_);
+        inputDeviceBuffer_ = nullptr;
+    }
+    if (outputDeviceBuffer_ != nullptr && acl.aclrtFree) {
+        acl.aclrtFree(outputDeviceBuffer_);
+        outputDeviceBuffer_ = nullptr;
+    }
+    if (outputHostBuffer_ != nullptr) {
+        delete[] outputHostBuffer_;
+        outputHostBuffer_ = nullptr;
+    }
+
     if (isLoad_) {
-        aclmdlDestroyDesc(modelDesc_);
-        aclmdlUnload(modelId_);
-        aclrtDestroyStream(stream_);
-        aclrtDestroyContext(context_);
-        aclrtResetDevice(deviceId_);
-        aclFinalize();
+        if (acl.aclmdlUnload) {
+            acl.aclmdlUnload(modelId_);
+        }
+        if (modelDesc_ != nullptr && acl.aclmdlDestroyDesc) {
+            acl.aclmdlDestroyDesc(modelDesc_);
+            modelDesc_ = nullptr;
+        }
         isLoad_ = false;
     }
+
+    if (deviceInited_) {
+        if (stream_ != nullptr && acl.aclrtDestroyStream) {
+            acl.aclrtDestroyStream(stream_);
+            stream_ = nullptr;
+        }
+        if (context_ != nullptr && acl.aclrtDestroyContext) {
+            acl.aclrtDestroyContext(context_);
+            context_ = nullptr;
+        }
+        if (acl.aclrtResetDevice) {
+            acl.aclrtResetDevice(deviceId_);
+        }
+        if (acl.aclFinalize) {
+            acl.aclFinalize();
+        }
+        deviceInited_ = false;
+    }
+
+    std::cout << "[YOLO] Unload complete" << std::endl;
 }

@@ -1,6 +1,20 @@
 {
   "app": {
-    "signingConfigs": [],
+    "signingConfigs": [
+      {
+        "name": "default",
+        "type": "HarmonyOS",
+        "material": {
+          "certpath": "/Users/raychen/.ohos/config/default_Ascend310_hzaWXOZZchPdX3OVcYT0aj2m9evUDiPt2PT5SGxyMbw=.cer",
+          "keyAlias": "debugKey",
+          "keyPassword": "0000001B0AD64019640C4054AFC8C33D2191BFCB709C52850D802B208D6FEA8D0FCC39841392F818F5603A",
+          "profile": "/Users/raychen/.ohos/config/default_Ascend310_hzaWXOZZchPdX3OVcYT0aj2m9evUDiPt2PT5SGxyMbw=.p7b",
+          "signAlg": "SHA256withECDSA",
+          "storeFile": "/Users/raychen/.ohos/config/default_Ascend310_hzaWXOZZchPdX3OVcYT0aj2m9evUDiPt2PT5SGxyMbw=.p12",
+          "storePassword": "0000001BA377FDAA80800C860A7806F2589E31FC35CD51A550151097518EE93BB09CCC137374CC569F6B0C"
+        }
+      }
+    ],
     "products": [
       {
         "name": "default",
