@@ -6,7 +6,7 @@ import { resourceManager } from '@kit.LocalizationKit';
 
 const DOMAIN = 0x0000;
 const TAG = 'EntryAbility';
-const MODEL_FILENAME = 'yolov5s.om';
+const MODEL_FILENAME = 'best.om';
 
 export default class EntryAbility extends UIAbility {
   private modelReady: Promise<void> = Promise.resolve();
@@ -27,14 +27,21 @@ export default class EntryAbility extends UIAbility {
       let filesDir = this.context.filesDir;
       let modelPath = filesDir + '/' + MODEL_FILENAME;
 
-      if (fs.accessSync(modelPath)) {
-        hilog.info(DOMAIN, TAG, 'Model already exists at %{public}s', modelPath);
-        AppStorage.setOrCreate('modelPath', modelPath);
-        return;
+      try {
+        if (fs.accessSync(modelPath)) {
+          hilog.info(DOMAIN, TAG, 'Model already exists at %{public}s', modelPath);
+          AppStorage.setOrCreate('modelPath', modelPath);
+          return;
+        }
+      } catch (err) {
+        hilog.info(DOMAIN, TAG, 'Model file not exist, will copy from rawfile');
       }
 
+      hilog.info(DOMAIN, TAG, 'Copying model from rawfile...');
       let resMgr: resourceManager.ResourceManager = this.context.resourceManager;
       let fileData: Uint8Array = await resMgr.getRawFileContent(MODEL_FILENAME);
+
+      hilog.info(DOMAIN, TAG, 'Model file size: %{public}d bytes', fileData.byteLength);
 
       let file = fs.openSync(modelPath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE);
       fs.writeSync(file.fd, fileData.buffer);
@@ -63,6 +70,31 @@ export default class EntryAbility extends UIAbility {
           return;
         }
         hilog.info(DOMAIN, TAG, 'Succeeded in loading the content.');
+        
+        try {
+          let windowClass = windowStage.getMainWindowSync();
+          windowClass.setWindowLayoutFullScreen(true).then(() => {
+            hilog.info(DOMAIN, TAG, 'Succeeded in setting window layout full screen');
+          }).catch((err: Error) => {
+            hilog.error(DOMAIN, TAG, 'Failed to set window layout full screen. Cause: %{public}s', err.message);
+          });
+          
+          let systemBarProperties: window.SystemBarProperties = {
+            statusBarColor: '#00000000',
+            statusBarContentColor: '#FFFFFF',
+            navigationBarColor: '#00000000',
+            navigationBarContentColor: '#FFFFFF',
+            isStatusBarLightIcon: false,
+            isNavigationBarLightIcon: false
+          };
+          windowClass.setWindowSystemBarProperties(systemBarProperties).then(() => {
+            hilog.info(DOMAIN, TAG, 'Succeeded in setting window system bar properties');
+          }).catch((err: Error) => {
+            hilog.error(DOMAIN, TAG, 'Failed to set window system bar properties. Cause: %{public}s', err.message);
+          });
+        } catch (err) {
+          hilog.error(DOMAIN, TAG, 'Failed to get main window. Cause: %{public}s', JSON.stringify(err));
+        }
       });
     }).catch((err: Error) => {
       hilog.error(DOMAIN, TAG, 'Model preparation failed: %{public}s', err.message);

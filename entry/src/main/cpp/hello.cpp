@@ -71,7 +71,12 @@ static void InitComplete(napi_env env, napi_status status, void* data) {
     if (asyncData->result) {
         napi_resolve_deferred(env, asyncData->deferred, result);
     } else {
-        napi_reject_deferred(env, asyncData->deferred, result);
+        napi_value errorMsg;
+        napi_create_string_utf8(env, "Engine initialization failed. Check model file and CANN environment.", 
+                                NAPI_AUTO_LENGTH, &errorMsg);
+        napi_value error;
+        napi_create_error(env, nullptr, errorMsg, &error);
+        napi_reject_deferred(env, asyncData->deferred, error);
     }
 
     napi_delete_async_work(env, asyncData->work);
