@@ -1,7 +1,7 @@
 import { image } from '@kit.ImageKit';
 import { photoAccessHelper } from '@kit.MediaLibraryKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
-import yoloEngine from 'libentry.so';
+import { YoloModel } from '../model/YoloModel';
 import { CLASS_COLORS, CLASS_NAMES, DetectionBox, MODEL_INPUT_SIZE } from '../model/DetectionType';
 
 @Entry
@@ -17,22 +17,21 @@ struct Index {
   private canvasSettings: RenderingContextSettings = new RenderingContextSettings(true);
   private canvasContext: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.canvasSettings);
   private canvasReady: boolean = false;
+  private yoloModel: YoloModel = new YoloModel();
 
   async aboutToAppear(): Promise<void> {
-    let modelPath = AppStorage.get<string>('modelPath') ?? '';
-    console.info('[Index] Model path from AppStorage: ' + modelPath);
-
-    if (modelPath.length === 0) {
-      this.tipText = '模型文件未就绪，请检查rawfile中是否存在best.om';
-      console.error('[Index] Model path is empty');
+    let modelBuffer = AppStorage.get<ArrayBuffer>('modelBuffer');
+    if (!modelBuffer || modelBuffer.byteLength === 0) {
+      this.tipText = '模型文件未就绪，请检查rawfile中是否存在best_kirin.ms';
+      console.error('[Index] Model buffer is empty');
       return;
     }
 
     try {
       this.tipText = '正在初始化推理引擎...';
-      console.info('[Index] Starting engine initialization...');
-      let engineReady = await yoloEngine.initYoloEngine(modelPath);
-      console.info('[Index] Engine initialization result: ' + engineReady);
+      console.info('[Index] Starting MindSpore Lite engine initialization...');
+      let engineReady = await this.yoloModel.init(modelBuffer);
+      console.info('[Index] Engine initialization result: ' + engineReady.toString());
       if (engineReady) {
         this.tipText = '引擎就绪，请选择X光图片';
         console.info('[Index] Engine initialized successfully');
@@ -127,10 +126,10 @@ struct Index {
 
   async doInference(buffer: ArrayBuffer): Promise<void> {
     this.isProcessing = true;
-    this.tipText = '昇腾 310B 正在推理中...';
+    this.tipText = 'MindSpore Lite 正在推理中...';
 
     try {
-      this.boxList = await yoloEngine.runYoloInference(buffer, MODEL_INPUT_SIZE, MODEL_INPUT_SIZE);
+      this.boxList = await this.yoloModel.runInference(buffer);
       this.tipText = '检测完成，发现 ' + this.boxList.length.toString() + ' 个目标';
       this.drawBoxes();
     } catch (error) {
@@ -207,25 +206,31 @@ struct Index {
             Stack() {
               if (this.displayPixelMap) {
                 Image(this.displayPixelMap)
-                  .width(this.canvasSize)
-                  .height(this.canvasSize)
-                  .objectFit(ImageFit.Fill)
+                  .width('100%')
+                  .height('100%')
+                  .objectFit(ImageFit.Contain)
               } else {
                 SymbolGlyph($r('sys.symbol.camera'))
                   .fontSize(64)
                   .fontColor(['#CCCCCC'])
-                  .width(this.canvasSize)
-                  .height(this.canvasSize)
-                  .backgroundColor('#F5F7FA')
+                  .width('100%')
+                  .height('100%')
+                  // .backgroundColor($r('app.color.bg_camera_placeholder'))
               }
-
               Canvas(this.canvasContext)
-                .width(this.canvasSize)
-                .height(this.canvasSize)
-                .onReady(() => { this.canvasReady = true; this.drawBoxes(); })
+                .width('100%')
+                .height('100%')
+                .onReady(() => {
+                  this.canvasReady = true;
+                  this.drawBoxes();
+                })
             }
+            .width(this.canvasSize)
+            .height(this.canvasSize)
             .alignContent(Alignment.Center)
-            .borderRadius(16).clip(true).shadow({ radius: 16, color: '#20000000', offsetY: 4 })
+            .borderRadius(16)
+            .clip(true)
+            .shadow({ radius: 16, color: '#20000000', offsetY: 4 })
 
             Button(this.isProcessing ? '推理中...' : '选择X光图片')
               .width('100%').height(56).borderRadius(28).margin({ top: 20 })

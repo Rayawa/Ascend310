@@ -1,12 +1,11 @@
 import { AbilityConstant, ConfigurationConstant, UIAbility, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { window } from '@kit.ArkUI';
-import { fileIo as fs } from '@kit.CoreFileKit';
 import { resourceManager } from '@kit.LocalizationKit';
 
 const DOMAIN = 0x0000;
 const TAG = 'EntryAbility';
-const MODEL_FILENAME = 'best.om';
+const MODEL_FILENAME = 'best_kirin.ms';
 
 export default class EntryAbility extends UIAbility {
   private modelReady: Promise<void> = Promise.resolve();
@@ -19,39 +18,23 @@ export default class EntryAbility extends UIAbility {
     }
     hilog.info(DOMAIN, TAG, 'Ability onCreate');
 
-    this.modelReady = this.copyModelToSandbox();
+    this.modelReady = this.loadModelBuffer();
   }
 
-  private async copyModelToSandbox(): Promise<void> {
+  private async loadModelBuffer(): Promise<void> {
     try {
-      let filesDir = this.context.filesDir;
-      let modelPath = filesDir + '/' + MODEL_FILENAME;
-
-      try {
-        if (fs.accessSync(modelPath)) {
-          hilog.info(DOMAIN, TAG, 'Model already exists at %{public}s', modelPath);
-          AppStorage.setOrCreate('modelPath', modelPath);
-          return;
-        }
-      } catch (err) {
-        hilog.info(DOMAIN, TAG, 'Model file not exist, will copy from rawfile');
-      }
-
-      hilog.info(DOMAIN, TAG, 'Copying model from rawfile...');
+      hilog.info(DOMAIN, TAG, 'Loading model from rawfile...');
       let resMgr: resourceManager.ResourceManager = this.context.resourceManager;
       let fileData: Uint8Array = await resMgr.getRawFileContent(MODEL_FILENAME);
 
       hilog.info(DOMAIN, TAG, 'Model file size: %{public}d bytes', fileData.byteLength);
 
-      let file = fs.openSync(modelPath, fs.OpenMode.CREATE | fs.OpenMode.READ_WRITE);
-      fs.writeSync(file.fd, fileData.buffer);
-      fs.closeSync(file);
-
-      hilog.info(DOMAIN, TAG, 'Model copied to %{public}s', modelPath);
-      AppStorage.setOrCreate('modelPath', modelPath);
+      let modelBuffer = fileData.buffer;
+      AppStorage.setOrCreate('modelBuffer', modelBuffer);
+      hilog.info(DOMAIN, TAG, 'Model buffer stored in AppStorage');
     } catch (err) {
-      hilog.error(DOMAIN, TAG, 'copyModelToSandbox failed: %{public}s', JSON.stringify(err));
-      AppStorage.setOrCreate('modelPath', '');
+      hilog.error(DOMAIN, TAG, 'loadModelBuffer failed: %{public}s', JSON.stringify(err));
+      AppStorage.setOrCreate('modelBuffer', new ArrayBuffer(0));
     }
   }
 
@@ -70,7 +53,7 @@ export default class EntryAbility extends UIAbility {
           return;
         }
         hilog.info(DOMAIN, TAG, 'Succeeded in loading the content.');
-        
+
         try {
           let windowClass = windowStage.getMainWindowSync();
           windowClass.setWindowLayoutFullScreen(true).then(() => {
@@ -78,7 +61,7 @@ export default class EntryAbility extends UIAbility {
           }).catch((err: Error) => {
             hilog.error(DOMAIN, TAG, 'Failed to set window layout full screen. Cause: %{public}s', err.message);
           });
-          
+
           let systemBarProperties: window.SystemBarProperties = {
             statusBarColor: '#00000000',
             statusBarContentColor: '#FFFFFF',
